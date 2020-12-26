@@ -2,6 +2,7 @@ package com.example.maxrefdes100
 
 import android.app.Service
 import android.content.Intent
+import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import com.polidea.rxandroidble2.*
@@ -10,21 +11,40 @@ import io.reactivex.disposables.Disposable
 import java.util.*
 import kotlin.math.pow
 import kotlin.math.sqrt
+import androidx.lifecycle.MutableLiveData
 
 
 class ConnectionService : Service()  {
 
+    var accelData = MutableLiveData<List<Int>>()
+    var heartbeatData = MutableLiveData<Int>()
+    var connectionData = MutableLiveData<String>()
+
     private lateinit var rxBleClient: RxBleClient
-    private lateinit var bleDevice: RxBleDevice
-    private lateinit var connection: Disposable
-    private lateinit var mac: String
+    private var connection: Disposable? = null
+    private val binder = LocalBinder()
+    private var connected: Boolean = false
+    var mac = String()
+        set(value) { field = value }
+
+    inner class LocalBinder : Binder() {
+        fun getService(): ConnectionService = this@ConnectionService
+    }
 
     private fun processAccelerometer(data: ByteArray) {
-        val accelX = ((data[1].toInt() shl 8) + data[0].toInt()).toFloat()
-        val accelY = ((data[3].toInt() shl 8) + data[2].toInt()).toFloat()
-        val accelZ = ((data[5].toInt() shl 8) + data[4].toInt()).toFloat()
+        val accelX = (data[1].toInt() shl 8) + data[0].toInt()
+        val accelY = (data[3].toInt() shl 8) + data[2].toInt()
+        val accelZ = (data[5].toInt() shl 8) + data[4].toInt()
 
-        val accumulated = sqrt(accelX.pow(2) + accelY.pow(2) + accelZ.pow(2))
+        val accumulated = sqrt(
+         accelX.toFloat().pow(2)
+          + accelY.toFloat().pow(2)
+          + accelZ.toFloat().pow(2)
+        )
+
+        val accelDataList: List<Int> = listOf<Int>(accelX, accelY, accelZ)
+        accelData.postValue(accelDataList)
+
         Log.i("ACCEL_X", accelX.toString())
         Log.i("ACCEL_Y", accelY.toString())
         Log.i("ACCEL_Z", accelZ.toString())
@@ -32,11 +52,14 @@ class ConnectionService : Service()  {
     }
 
     private fun processHeartbeat(data: ByteArray) {
+        val hearthbeat = (data[1].toInt() shl 8) + data[0].toInt()
 
+        heartbeatData.postValue(hearthbeat)
+
+        Log.i("HEARTHBEAT", hearthbeat.toString())
     }
 
-
-    private fun connectionSetup() {
+    private fun connectionSetup(bleDevice: RxBleDevice) {
         connection = bleDevice.establishConnection(false)
             .observeOn(AndroidSchedulers.mainThread())
             .subscribe(
@@ -85,39 +108,57 @@ class ConnectionService : Service()  {
         )
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        mac = intent?.extras?.getString("mac")!!
+    fun connect() {
+        if (connected) {
+            return
+        }
 
-        bleDevice = rxBleClient.getBleDevice(mac)
+        val bleDevice: RxBleDevice = rxBleClient.getBleDevice(mac)
 
         bleDevice.observeConnectionStateChanges()
-            .observeOn(AndroidSchedulers.mainThread())
-            .subscribe(
-                {
-                    if (it == RxBleConnection.RxBleConnectionState.CONNECTED) {
-                        Log.i("CONNECTION STATE", "CONNECTED")
-                    } else if (it == RxBleConnection.RxBleConnectionState.DISCONNECTED) {
-                        Log.i("CONNECTION STATE", "DISCONNECTED")
-                        connection.dispose()
-                        connectionSetup()
-                    }
-                },
-                {
-                    Log.e("CONNECTION FAILURE", it.message.toString())
-                }
-            )
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(
+                        {
+                            if (it == RxBleConnection.RxBleConnectionState.CONNECTED) {
+                                Log.i("CONNECTION STATE", "CONNECTED")
+                                connectionData.postValue("CONNECTED")
+                                connected = true
+                            } else if (it == RxBleConnection.RxBleConnectionState.DISCONNECTED) {
+                                Log.i("CONNECTION STATE", "DISCONNECTED")
+                                connectionData.postValue("DISCONNECTED")
+                                connection?.dispose()
+                                connected = false
+                            }
+                        },
+                        {
+                            Log.e("CONNECTION FAILURE", it.message.toString())
+                        }
+                )
 
-        connectionSetup()
+        connectionSetup(bleDevice)
+    }
 
+    fun disconnect() {
+        if (connected) {
+            connection?.dispose()
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        connection.dispose()
+        Log.e("SSSSSSSSSSSSSSSSSSSSSSSSSSSSS", "SSSSSSSSSSS")
+        connection?.dispose()
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        return false
     }
 
     override fun onBind(intent: Intent?): IBinder? {
-        return null
+        return binder
     }
 }
