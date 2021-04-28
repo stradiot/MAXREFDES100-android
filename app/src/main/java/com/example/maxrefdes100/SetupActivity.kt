@@ -4,11 +4,13 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Color
 import android.os.Bundle
 import android.os.IBinder
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Observer
 
@@ -17,26 +19,31 @@ class SetupActivity : AppCompatActivity() {
     private lateinit var connectionService: ConnectionService
     private var serviceBound: Boolean = false
 
-    val accelObserver = Observer<List<Int>> {
-        val accelXValue = findViewById<TextView>(R.id.accelXValue)
-        val accelYValue = findViewById<TextView>(R.id.accelYValue)
-        val accelZValue = findViewById<TextView>(R.id.accelZValue)
+    val movementObserver = Observer<Boolean> {
+        val movementValue = findViewById<TextView>(R.id.movementValue)
 
-        accelXValue.text = it[0].toString()
-        accelYValue.text = it[1].toString()
-        accelZValue.text = it[2].toString()
+        movementValue.text = if (it) "MOVING" else "IDLE"
+
+        val color = if (it) "#BF0101" else "#077A42"
+        movementValue.setTextColor(Color.parseColor(color))
     }
 
-    val heartbeatObserver = Observer<Int> {
-        val heartbeatValue = findViewById<TextView>(R.id.heartbeatValue)
+    val heartrateObserver = Observer<Int> {
+        val heartrateValue = findViewById<TextView>(R.id.heartrateValue)
 
-        heartbeatValue.text = it.toString()
+        heartrateValue.text = it.toString()
+
+        val color = if (it == 0) "#BF0101" else "#FF757575"
+        heartrateValue.setTextColor(Color.parseColor(color))
     }
 
     val connectionObserver = Observer<String> {
         val connectionValue = findViewById<TextView>(R.id.connectionValue)
 
         connectionValue.text = it
+
+        val color = if (it == "CONNECTED") "#077A42" else "#BF0101"
+        connectionValue.setTextColor(Color.parseColor(color))
     }
 
     private val connection = object : ServiceConnection {
@@ -84,17 +91,28 @@ class SetupActivity : AppCompatActivity() {
 
     private fun onApplyClick() {
         val mac = findViewById<EditText>(R.id.editTextMAC)
+        val host = findViewById<EditText>(R.id.editTextHost)
 
 //        "03:00:00:51:3B:A5"
+        if (mac.text.isEmpty() || host.text.isEmpty()) {
+            Toast.makeText(applicationContext,"Fill in mac and host fields", Toast.LENGTH_SHORT).show()
+            return
+        }
         if (serviceBound) {
             connectionService.mac = mac.text.toString()
+            connectionService.host = host.text.toString()
         }
     }
 
     private fun onConnectClick() {
+        if (connectionService.mac.isEmpty() || connectionService.host.isEmpty()) {
+            Toast.makeText(applicationContext,"MAC and HOST need to be set", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         connectionService.connect()
-        connectionService.accelData.observe(this, accelObserver)
-        connectionService.heartbeatData.observe(this, heartbeatObserver)
+        connectionService.movementData.observe(this, movementObserver)
+        connectionService.heartrateData.observe(this, heartrateObserver)
         connectionService.connectionData.observe(this, connectionObserver)
     }
 

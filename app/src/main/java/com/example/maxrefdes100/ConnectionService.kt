@@ -7,60 +7,116 @@ import android.os.IBinder
 import android.util.Log
 import com.polidea.rxandroidble2.*
 import io.reactivex.android.schedulers.AndroidSchedulers
-import io.reactivex.disposables.Disposable
+import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.Observable
+import io.reactivex.subjects.PublishSubject
+import com.jakewharton.rx.ReplayingShare
 import java.util.*
 import kotlin.math.pow
 import kotlin.math.sqrt
+import org.json.JSONObject
 import androidx.lifecycle.MutableLiveData
-
+import com.android.volley.toolbox.Volley
+import com.android.volley.Request
+import com.android.volley.RequestQueue
+import com.android.volley.toolbox.JsonObjectRequest
+import com.android.volley.Response
 
 class ConnectionService : Service()  {
 
-    var accelData = MutableLiveData<List<Int>>()
-    var heartbeatData = MutableLiveData<Int>()
+    private lateinit var bleDevice: RxBleDevice
+
+    var movementData = MutableLiveData<Boolean>()
+    var heartrateData = MutableLiveData<Int>()
     var connectionData = MutableLiveData<String>()
 
+    private lateinit var queue: RequestQueue
+
     private lateinit var rxBleClient: RxBleClient
-    private var connection: Disposable? = null
+    private lateinit var connectionObservable: Observable<RxBleConnection>
+    private val connectionDisposable = CompositeDisposable()
     private val binder = LocalBinder()
     private var connected: Boolean = false
     var mac = String()
+        set(value) { field = value }
+    var host = String()
         set(value) { field = value }
 
     inner class LocalBinder : Binder() {
         fun getService(): ConnectionService = this@ConnectionService
     }
 
-    private fun processAccelerometer(data: ByteArray) {
-        val accelX = (data[1].toInt() shl 8) + data[0].toInt()
-        val accelY = (data[3].toInt() shl 8) + data[2].toInt()
-        val accelZ = (data[5].toInt() shl 8) + data[4].toInt()
+    private var hrLastVal: Int = 0x00;
 
-        val accumulated = sqrt(
-         accelX.toFloat().pow(2)
-          + accelY.toFloat().pow(2)
-          + accelZ.toFloat().pow(2)
+    private fun sendHTTPData() {
+        val jsonobj = JSONObject()
+        val url = "http://" + host + "/value_update"
+
+        jsonobj.put("activity", movementData.value)
+        jsonobj.put("heartrate", heartrateData.value)
+
+        val request = JsonObjectRequest(Request.Method.POST, url, jsonobj,
+            Response.Listener {
+                response ->
+                    Log.i("HTTP RESPONSE", response.toString())
+            }, Response.ErrorListener {
+                error ->
+                    Log.e("HTTP RESPONSE", error.toString())
+            }
         )
-
-        val accelDataList: List<Int> = listOf<Int>(accelX, accelY, accelZ)
-        accelData.postValue(accelDataList)
-
-        Log.i("ACCEL_X", accelX.toString())
-        Log.i("ACCEL_Y", accelY.toString())
-        Log.i("ACCEL_Z", accelZ.toString())
-        Log.i("ACCUMULATED", accumulated.toString())
+        queue.add(request)
     }
 
-    private fun processHeartbeat(data: ByteArray) {
-        val hearthbeat = (data[1].toInt() shl 8) + data[0].toInt()
+    private fun processMovement(data: ByteArray) {
+        val movement = if (data[0].toInt() == 0) false else true
 
-        heartbeatData.postValue(hearthbeat)
+        movementData.postValue(movement)
 
-        Log.i("HEARTHBEAT", hearthbeat.toString())
+        Log.i("MOVEMENT", movement.toString())
+
+        val rpcVal = if (movement == false) 0x01.toByte() else 0x00.toByte()
+
+        Log.i("RPC value", rpcVal.toString())
+
+        if (rpcVal.toInt() == hrLastVal) return
+        if (bleDevice.connectionState == RxBleConnection.RxBleConnectionState.CONNECTED) {
+            connectionObservable
+                .firstOrError()
+                .flatMap {
+                    it.writeCharacteristic(
+                        UUID.fromString("36e55e37-6b5b-420b-9107-0d34a0e8675a"),
+                        byteArrayOf(rpcVal)
+                    )
+                }
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(
+                    { Log.i("RPC write SUCCESS", "A"); hrLastVal = rpcVal.toInt() },
+                    { Log.e("RPC write FAILURE", it.toString()) }
+                )
+                .let { connectionDisposable.add(it) }
+        }
     }
+
+    private fun processHeartrate(data: ByteArray) {
+        val heartrate = data[0].toInt()
+
+        heartrateData.postValue(heartrate)
+
+        Log.i("HEARTRATE", heartrate.toString())
+
+        sendHTTPData()
+    }
+
+    private fun prepareConnectionObservable(): Observable<RxBleConnection> =
+        bleDevice
+            .establishConnection(false)
+            .takeUntil(PublishSubject.create<Unit>())
+            .compose(ReplayingShare.instance())
 
     private fun connectionSetup(bleDevice: RxBleDevice) {
-        connection = bleDevice.establishConnection(false)
+        connectionObservable = prepareConnectionObservable()
+
+        connectionObservable
             .observeOn(AndroidSchedulers.mainThread())
             .subscribe(
                 {
@@ -69,10 +125,10 @@ class ConnectionService : Service()  {
                         .observeOn(AndroidSchedulers.mainThread())
                         .subscribe(
                             {
-                                processAccelerometer(it)
+                                processMovement(it)
                             },
                             {
-                                Log.e("ACCELERATION NOTIFICATION SETUP FAILURE", it.message.toString())
+                                Log.e("MOVEMENT NOTIFICATION SETUP FAILURE", it.message.toString())
                             }
                         )
 
@@ -81,10 +137,10 @@ class ConnectionService : Service()  {
                         .observeOn(AndroidSchedulers.mainThread())
                         .subscribe(
                             {
-                                processHeartbeat(it)
+                                processHeartrate(it)
                             },
                             {
-                                Log.e("HEARTBEAT NOTIFICATION SETUP FAILURE", it.message.toString())
+                                Log.e("HEARTRATE NOTIFICATION SETUP FAILURE", it.message.toString())
                             }
                         )
                 },
@@ -92,10 +148,13 @@ class ConnectionService : Service()  {
                     Log.e("CONNECTION FAILURE", it.message.toString())
                 }
             )
+            .let { connectionDisposable.add(it) }
     }
 
     override fun onCreate() {
         super.onCreate()
+
+        queue = Volley.newRequestQueue(this)
 
         rxBleClient = RxBleClient.create(this)
         RxBleClient.updateLogOptions(
@@ -113,7 +172,7 @@ class ConnectionService : Service()  {
             return
         }
 
-        val bleDevice: RxBleDevice = rxBleClient.getBleDevice(mac)
+        bleDevice = rxBleClient.getBleDevice(mac)
 
         bleDevice.observeConnectionStateChanges()
                 .observeOn(AndroidSchedulers.mainThread())
@@ -126,7 +185,7 @@ class ConnectionService : Service()  {
                             } else if (it == RxBleConnection.RxBleConnectionState.DISCONNECTED) {
                                 Log.i("CONNECTION STATE", "DISCONNECTED")
                                 connectionData.postValue("DISCONNECTED")
-                                connection?.dispose()
+                                connectionDisposable?.dispose()
                                 connected = false
                             }
                         },
@@ -140,7 +199,7 @@ class ConnectionService : Service()  {
 
     fun disconnect() {
         if (connected) {
-            connection?.dispose()
+            connectionDisposable?.dispose()
         }
     }
 
@@ -150,8 +209,8 @@ class ConnectionService : Service()  {
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.e("SSSSSSSSSSSSSSSSSSSSSSSSSSSSS", "SSSSSSSSSSS")
-        connection?.dispose()
+        connectionDisposable?.dispose()
+        //queue.cancelAll()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
